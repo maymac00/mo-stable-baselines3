@@ -847,10 +847,10 @@ class MoRolloutBuffer(RolloutBuffer):
         super().__init__(buffer_size, observation_space, action_space, device, gamma, gae_lambda, *args, **kwargs)
         # Overwrite objectives buffer
         # self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
-        self.rewards = np.zeros((buffer_size, self.n_envs, n_objectives), dtype=np.float32)
-        self.advantages = np.zeros((buffer_size, self.n_envs, n_objectives), dtype=np.float32)
-        self.returns = np.zeros((buffer_size, self.n_envs, n_objectives), dtype=np.float32)
-        self.values = np.zeros((buffer_size, self.n_envs, n_objectives), dtype=np.float32)
+        self.rewards = np.zeros((buffer_size, self.n_envs, self.n_objectives), dtype=np.float32)
+        self.advantages = np.zeros((buffer_size, self.n_envs, self.n_objectives), dtype=np.float32)
+        self.returns = np.zeros((buffer_size, self.n_envs, self.n_objectives), dtype=np.float32)
+        self.values = np.zeros((buffer_size, self.n_envs, self.n_objectives), dtype=np.float32)
 
     def reset(self) -> None:
         super().reset()
