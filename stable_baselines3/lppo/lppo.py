@@ -8,6 +8,8 @@ from typing import Union, Optional, Any, List
 import numpy as np
 
 import torch as th
+
+from stable_baselines3.common.buffers import MoRolloutBuffer
 from stable_baselines3.common.vec_env.patch_gym import _convert_space
 
 from stable_baselines3.common.save_util import load_from_zip_file, recursive_setattr
@@ -35,6 +37,8 @@ class LPPO(PPO):
                  tolerance: Union[float, Schedule] = 3e-5, recent_loses_len: int = 50, *args, **kwargs):
         super().__init__(policy, env, *args, **kwargs)
         # We need to replace the default rollout buffer for the multi-objective one
+        assert isinstance(self.rollout_buffer, MoRolloutBuffer)
+        assert self.rollout_buffer.n_objectives == n_objectives
         """self.rollout_buffer = MultiObjectiveRolloutBuffer(
             self.n_steps, self.observation_space, self.action_space, self.device, n_objectives=n_objectives,
             n_envs=env.num_envs, **self.rollout_buffer_kwargs
@@ -47,6 +51,20 @@ class LPPO(PPO):
         self.recent_losses = [deque(maxlen=recent_loses_len) for _ in range(self.n_objectives)]
         self.tolerance = tolerance
         self.j = np.zeros(self.n_objectives - 1)
+
+    def get_scalarisation_weights(self):
+        """
+        Get the scalarisation weights for the current policy update. These weights are computed based on the
+        beta and mu values. Where beta are fixed coefficients and mu are the Lagrange multipliers that are dynamic.
+        """
+        first_order_weights = th.zeros(self.n_objectives).to(self.policy.device)
+        for obj in range(self.n_objectives - 1):
+            w = self.beta_values[obj] + self.mu_values[obj] * sum(
+                [self.beta_values[j] for j in range(obj + 1, self.n_objectives)])
+            first_order_weights[obj] = w
+        first_order_weights[-1] = th.tensor(self.beta_values[self.n_objectives - 1],
+                                            dtype=first_order_weights.dtype)
+        return first_order_weights
 
     def train(self):
         """
@@ -76,13 +94,7 @@ class LPPO(PPO):
         continue_training = True
 
         # Lexico update
-        first_order_weights = th.zeros(self.n_objectives).to(self.policy.device)
-        for obj in range(self.n_objectives - 1):
-            w = self.beta_values[obj] + self.mu_values[obj] * sum(
-                [self.beta_values[j] for j in range(obj + 1, self.n_objectives)])
-            first_order_weights[obj] = w
-        first_order_weights[-1] = th.tensor(self.beta_values[self.n_objectives - 1],
-                                            dtype=first_order_weights.dtype)
+        first_order_weights = self.get_scalarisation_weights()
         last_values = None
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):

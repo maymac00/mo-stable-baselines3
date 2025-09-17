@@ -2,7 +2,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.buffers import MoRolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import MoVecEnv, MoDummyVecEnv, DummyVecEnv, VecMonitor
-from stable_baselines3.lppo.lppo import LPPO
+from stable_baselines3.lppo import LPPO, seqLPPO
 
 
 def linear_schedule(initial_value):
@@ -58,11 +58,11 @@ args = {
     "n_steps": 1000,
     "batch_size": 5000,
     "ent_coef": 0.04,
-    "learning_rate": [linear_schedule(3e-5), linear_schedule(3e-4)],
+    "learning_rate": [linear_schedule(3e-4), linear_schedule(3e-3)],
     "rollout_buffer_class": MoRolloutBuffer,
     "rollout_buffer_kwargs": {},
     "beta_values": [2.0, 1.0],
-    "eta_values": 5.0,
+    "eta_values": 1e-3*2,
     "policy_kwargs": {
         "n_objectives": 2,
         "net_arch": dict(pi=[256, 128], vf=[256, 128])
@@ -73,17 +73,17 @@ args = {
     "clip_range_vf": 0.2,
     "gamma": 0.8,
     "normalize_advantage": True,
-    "tolerance": 0.0,
+    "tolerance": 0.01,
     "recent_loses_len": 80,
     "n_epochs": 40
 }
 
 
-model = LPPO("MoMlpPolicy", env, 2, **args)
+model = seqLPPO("MoMlpPolicy", env, 2, **args)
 
 #model = PPO("MlpPolicy", env, **args)
 
-model.learn(total_timesteps=10000, log_interval=1)
+model.learn(total_timesteps=100000, log_interval=1)
 model.save("model")
 
 #model.save("test")
