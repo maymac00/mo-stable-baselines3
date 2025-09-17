@@ -160,7 +160,7 @@ class seqLPPO(LPPO):
                 scalarised_actor_loss = th.matmul(mo_actor_loss, first_order_weights)
 
                 # Logging
-                pg_losses.append(np.dot(no_entropy_loss, first_order_weights))
+                pg_losses.append(np.dot(no_entropy_loss, first_order_weights.cpu()))
                 clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
                 clip_fractions.append(clip_fraction)
 

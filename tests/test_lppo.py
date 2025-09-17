@@ -68,7 +68,7 @@ args = {
         "net_arch": dict(pi=[256, 128], vf=[256, 128])
     },
     "verbose": 1,
-    "device": "cpu",
+    "device": "cuda:0",
     "tensorboard_log": "runs",
     "clip_range_vf": 0.2,
     "gamma": 0.8,
