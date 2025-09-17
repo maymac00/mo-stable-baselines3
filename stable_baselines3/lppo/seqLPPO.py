@@ -62,7 +62,7 @@ class seqLPPO(LPPO):
         # We first gather the recent losses
         if self.converged():
             # We converged, we can move to the next objective
-            print("Converged for reward function {}!".format(self.i))
+            print("Converged for reward function {}!".format(self.active_obj))
             self.active_obj = 0 if self.active_obj == self.n_objectives - 1 else self.active_obj + 1
         else:
             # Not converged, stay on the same objective
