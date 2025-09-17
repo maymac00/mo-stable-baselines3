@@ -73,6 +73,7 @@ class seqLPPO(LPPO):
                 length = int(self.recent_losses[self.active_obj].maxlen/2)
                 if len(self.recent_losses[self.active_obj]) > length:
                     self.j[self.active_obj] = -th.tensor(self.recent_losses[self.active_obj])[length:].mean()
+                    self.logger.record(f"train_mo/mean_recent_loss_{self.active_obj}", self.j[self.active_obj])
 
         # Then we update the lagrangian multipliers of the active objective and the ones before it.
         # note that if we are on the first objective, no update is performed
