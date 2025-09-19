@@ -296,11 +296,13 @@ class LPPO(PPO):
                                first_order_weights[obj].float().item())
             self.logger.record(f"train_mo/loss_{obj}", np.mean(self.recent_losses[obj]))
             self.logger.record(f"train_mo/explained_variance_{obj}", explained_vars[obj])
-            
-        for obj in range(self.n_objectives - 1):
+            if obj == self.n_objectives - 1:
+                break
+
             self.logger.record(f"train_mo/mu_{obj}", self.mu_values[obj])
             self.logger.record(f"train_mo/diffs_{obj}", diffs[obj].item())
             self.logger.record(f"train_mo/tolerance_hit_{obj}", tolerance_hit[obj])
+            if self.lagr_momentum: self.logger.record(f"train_mo/momentum_velocity_{obj}", self.momentum_velocity[obj])
 
             if callable(self.eta_values[obj]):
                 self.logger.record(f"train_mo/eta_{obj}", self.eta_values[obj](self._current_progress_remaining))
