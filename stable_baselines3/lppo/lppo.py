@@ -34,7 +34,7 @@ class LPPO(PPO):
     }
 
     def __init__(self, policy, env, n_objectives, eta_values: List[Union[float, Schedule]] = None, beta_values: List[float] = None,
-                 tolerance: Union[float, Schedule] = 3e-5, recent_loses_len: int = 50, *args, **kwargs):
+                 tolerance: Union[float, Schedule] = 3e-5, recent_loses_len: int = 50, lagr_momentum:bool=False, *args, **kwargs):
         super().__init__(policy, env, *args, **kwargs)
         # We need to replace the default rollout buffer for the multi-objective one
         assert isinstance(self.rollout_buffer, MoRolloutBuffer)
@@ -51,6 +51,8 @@ class LPPO(PPO):
         self.recent_losses = [deque(maxlen=recent_loses_len) for _ in range(self.n_objectives)]
         self.tolerance = tolerance
         self.j = np.zeros(self.n_objectives - 1)
+        self.lagr_momentum = lagr_momentum
+        self.momentum_velocity = np.array([0.0] * (n_objectives - 1))
 
     def get_scalarisation_weights(self):
         """
@@ -249,13 +251,22 @@ class LPPO(PPO):
             eta = self.eta_values[i] if not callable(self.eta_values[i]) else self.eta_values[i](
                 self._current_progress_remaining)
             diff = abs(current_loss_on_j-self.j[i])
+
+
             if diff > tol:
                 if current_loss_on_j > self.j[i]:
                     # we are deviating from optimal
-                    self.mu_values[i] += eta * diff
+                    if self.lagr_momentum:
+                        self.momentum_velocity[i] = 0.9 * self.momentum_velocity[i] + eta * diff
+                        self.mu_values[i] += self.momentum_velocity[i]
+                    else:
+                        self.mu_values[i] += eta * diff
+
                 else:
                     # we can relax the constraint
                     self.mu_values[i] -= eta * diff
+                    if self.lagr_momentum:
+                        self.momentum_velocity[i] *= 0.9 # and decay the momentum
             else:
                 tolerance_hit[i] = 1
 
