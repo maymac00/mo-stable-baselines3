@@ -269,6 +269,8 @@ class LPPO(PPO):
                         self.momentum_velocity[i] *= 0.9 # and decay the momentum
             else:
                 tolerance_hit[i] = 1
+                if self.lagr_momentum:
+                    self.momentum_velocity[i] *= 0.9  # and decay the momentum
 
             self.mu_values[i] = max(0, self.mu_values[i])
             diffs.append(diff)
