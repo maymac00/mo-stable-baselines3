@@ -28,20 +28,24 @@ from stable_baselines3.lppo.policies import MoActorCriticPolicy
 from stable_baselines3.ppo.ppo import PPO
 import warnings
 
+
 class seqLPPO(LPPO):
 
-    def __init__(self, policy, env, n_objectives, eta_values: List[Union[float, Schedule]] = None, beta_values: List[float] = None,
+    def __init__(self, policy, env, n_objectives, eta_values: List[Union[float, Schedule]] = None,
+                 beta_values: List[float] = None,
                  tolerance: Union[float, Schedule] = 3e-5, recent_loses_len: int = 50, *args, **kwargs):
-        super().__init__(policy, env, n_objectives, eta_values, beta_values, tolerance, recent_loses_len, *args, **kwargs)
+        super().__init__(policy, env, n_objectives, eta_values, beta_values, tolerance, recent_loses_len, *args,
+                         **kwargs)
 
-        self.active_obj = 0 # Goes from 0 to n_objectives-1
+        self.active_obj = 0  # Goes from 0 to n_objectives-1
 
-    def converged(self, minimum_updates=50) -> bool:
+    def converged(self, minimum_updates=None) -> bool:
         """
         Check if the training has converged for the active objective.
         :return: (bool)
         """
         # If not enough updates have been performed, assume not converged
+        minimum_updates = minimum_updates if minimum_updates is not None else self.recent_losses[0].maxlen
         if len(self.recent_losses[self.active_obj]) < minimum_updates:
             return False
         # Else check if the loss has stopped improving, within some tolerance
@@ -51,43 +55,42 @@ class seqLPPO(LPPO):
             self.logger.record(f"train_mo/tolerance", tol)
             length = len(self.recent_losses[self.active_obj])
             # We compare the recent half of the buffer with the older half
-            l_old_mean = th.tensor(self.recent_losses[self.active_obj])[:int(length/2)].mean().float()
-            l_new_mean = th.tensor(self.recent_losses[self.active_obj])[int(length/2):].mean().float()
+            l_old_mean = th.tensor(self.recent_losses[self.active_obj])[:int(length / 2)].mean().float()
+            l_new_mean = th.tensor(self.recent_losses[self.active_obj])[int(length / 2):].mean().float()
             # if diff is more than tol, we did not converge yet
             if abs(l_old_mean - l_new_mean) / abs(l_new_mean) > tol:
                 return False
-        return True
+            else:
+                return True
 
     def seq_update_lagrangian_multipliers(self):
         # We first gather the recent losses
         if self.converged():
             # We converged, we can move to the next objective
-            print("Converged for reward function {}!".format(self.active_obj))
+            print(f"Converged for reward function {self.active_obj}, t= {1 - self._current_progress_remaining}!")
             self.active_obj = 0 if self.active_obj == self.n_objectives - 1 else self.active_obj + 1
+            self.recent_losses[self.active_obj].clear()
+
         else:
-            # Not converged, stay on the same objective
-            if self.active_obj == self.n_objectives - 1:
-                # We do not care about the last objective
-                pass
-            else:
-                length = int(self.recent_losses[self.active_obj].maxlen/2)
-                if len(self.recent_losses[self.active_obj]) > length:
-                    self.j[self.active_obj] = -th.tensor(self.recent_losses[self.active_obj])[length:].mean()
-                    self.logger.record(f"train_mo/mean_recent_loss_{self.active_obj}", self.j[self.active_obj])
+            length = int(self.recent_losses[self.active_obj].maxlen / 2)
+            if len(self.recent_losses[self.active_obj]) < length:
+                return
+            for i in range(self.n_objectives - 1):
+                if len(self.recent_losses[i]) > length + 1:
+                    self.j[i] = -th.tensor(self.recent_losses[i])[length:].mean()
+                    self.logger.record(f"train_mo/mean_recent_loss_{i}", self.j[i])
 
-        # Then we update the lagrangian multipliers of the active objective and the ones before it.
-        # note that if we are on the first objective, no update is performed
-        for i in range(self.active_obj):
-            eta = self.eta_values[i] if not callable(self.eta_values[i]) else self.eta_values[i](
-                self._current_progress_remaining)
+            # Then we update the lagrangian multipliers of the active objective and the ones before it.
+            # note that if we are on the first objective, no update is performed
+            for i in range(self.active_obj):
+                eta = self.eta_values[i] if not callable(self.eta_values[i]) else self.eta_values[i](
+                    self._current_progress_remaining)
 
-            self.mu_values[i] += eta * (self.j[i] - (-self.recent_losses[i][-1]))
-            self.mu_values[i] = max(self.mu_values[i], 0.0)
-
+                self.mu_values[i] += eta * (self.j[i] - (-self.recent_losses[i][-1]))
+                self.mu_values[i] = max(self.mu_values[i], 0.0)
 
     def train(self):
         self.policy.set_training_mode(True)
-
         # Update optimizer learning rate
         if self.different_optimizers:
             self._update_learning_rate([self.policy.actor_optimizer, self.policy.critic_optimizer])
@@ -101,7 +104,7 @@ class seqLPPO(LPPO):
             clip_range_vf = self.clip_range_vf(self._current_progress_remaining)  # type: ignore[operator]
 
         entropy_losses = []
-        pg_losses, value_losses = [], []
+        pg_losses, value_losses, mo_losses = [], [], [[]]*self.n_objectives
         clip_fractions = []
 
         continue_training = True
@@ -119,8 +122,6 @@ class seqLPPO(LPPO):
                 if isinstance(self.action_space, spaces.Discrete):
                     # Convert discrete action from float to long
                     actions = rollout_data.actions.long().flatten()
-
-
 
                 values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
                 values = values.reshape(-1, self.n_objectives)
@@ -142,21 +143,40 @@ class seqLPPO(LPPO):
 
                 # ratio between old and new policy, should be one at the first iteration
                 ratio = th.exp(log_prob - rollout_data.old_log_prob)
+                first_order_weights[0] = 2
+                first_order_weights[1] = 1
+                #TODO scalarised_advantage = th.matmul(advantages[:, :self.active_obj + 1], first_order_weights[:self.active_obj + 1])
+                scalarised_advantage = th.matmul(advantages, first_order_weights)
+                if self.normalize_advantage and len(advantages) > 1:
+                    # normalize advantages per objective
+                    scalarised_advantage = (scalarised_advantage - scalarised_advantage.mean(axis=0)) / (scalarised_advantage.std(axis=0) + 1e-8)
 
-                unclipped_mo_actor_loss = ratio.unsqueeze(dim=1)*advantages
+                # Compute losses separately
+
+                unclipped_mo_actor_loss = ratio.unsqueeze(dim=1) * advantages
                 clamped_mo_actor_loss = th.clamp(ratio, 1 - clip_range, 1 + clip_range).unsqueeze(1) * advantages
                 mo_actor_loss = th.min(unclipped_mo_actor_loss, clamped_mo_actor_loss)
                 mo_actor_loss = th.mean(mo_actor_loss, axis=0)
                 no_entropy_loss = np.array(mo_actor_loss.detach().cpu())
-
                 # Add entropy regularisation
                 mo_actor_loss += self.ent_coef * entropy_loss
+                bckpr_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], first_order_weights[:self.active_obj + 1])
+
+                # Compute losses from scalarised advantage
+                unclipped_actor_loss = ratio.unsqueeze(dim=1) * scalarised_advantage
+                clamped_actor_loss =  th.clamp(ratio, 1 - clip_range, 1 + clip_range).unsqueeze(1) * scalarised_advantage
+                actor_loss = th.min(unclipped_actor_loss, clamped_actor_loss)
+                actor_loss = actor_loss.mean()
+                actor_loss += self.ent_coef * entropy_loss
+                bckpr_loss = actor_loss
+
 
                 # We only consider the losses of the active objective and the objectives that are more important than it
-                bckpr_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], first_order_weights[:self.active_obj + 1]) # This is the loss we backpropagate
+                #bckpr_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], first_order_weights[:self.active_obj + 1]) # This is the loss we backpropagate
+                #bckpr_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], th.tensor([0., 1.]).to(mo_actor_loss.device))  # This is the loss we backpropagate
 
                 for obj in range(self.n_objectives):
-                    self.recent_losses[obj].append(no_entropy_loss[obj])
+                    mo_losses[obj].append(no_entropy_loss[obj])
 
                 scalarised_actor_loss = th.matmul(mo_actor_loss, first_order_weights)
 
@@ -196,7 +216,7 @@ class seqLPPO(LPPO):
                 entropy_losses.append(entropy_loss.item())
 
                 # GENERAL LOSES
-                actor_loss = scalarised_actor_loss # just for standard naming
+                actor_loss = scalarised_actor_loss  # just for standard naming
 
                 critic_loss = self.vf_coef * value_loss
 
@@ -214,7 +234,6 @@ class seqLPPO(LPPO):
                     if self.verbose >= 1:
                         print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
                     break
-
 
                 if self.different_optimizers:
                     self.policy.actor_optimizer.zero_grad()
@@ -243,6 +262,9 @@ class seqLPPO(LPPO):
             if not continue_training:
                 break
 
+            for obj in range(self.n_objectives):
+                self.recent_losses[obj].append(sum(mo_losses[obj]) / len(mo_losses[obj]))
+
             self.seq_update_lagrangian_multipliers()
 
             # logs
@@ -262,13 +284,13 @@ class seqLPPO(LPPO):
             for obj in range(self.n_objectives):
                 self.logger.record(f"train_mo/advantage_scalarisation_weight_{obj}",
                                    first_order_weights[obj].float().item())
-                self.logger.record(f"train_mo/loss_{obj}", np.mean(self.recent_losses[obj]))
+                if len(self.recent_losses[obj]) > 0:
+                    self.logger.record(f"train_mo/loss_{obj}", np.mean(self.recent_losses[obj]))
 
             for obj in range(self.n_objectives - 1):
                 self.logger.record(f"train_mo/mu_{obj}", self.mu_values[obj])
                 if callable(self.eta_values[obj]):
                     self.logger.record(f"train_mo/eta_{obj}", self.eta_values[obj](self._current_progress_remaining))
-
 
             # self.logger.record("train/explained_variance", explained_var)
             if hasattr(self.policy, "log_std"):
