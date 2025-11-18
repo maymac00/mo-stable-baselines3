@@ -104,7 +104,8 @@ class seqLPPO(LPPO):
             clip_range_vf = self.clip_range_vf(self._current_progress_remaining)  # type: ignore[operator]
 
         entropy_losses = []
-        pg_losses, value_losses, mo_losses = [], [], [[]]*self.n_objectives
+        pg_losses, value_losses, mo_losses = [], [], [[] for _ in range(self.n_objectives)]
+        #pg_losses, value_losses, mo_losses = [], [], [[]]*self.n_objectives
         clip_fractions = []
 
         continue_training = True
@@ -143,45 +144,37 @@ class seqLPPO(LPPO):
 
                 # ratio between old and new policy, should be one at the first iteration
                 ratio = th.exp(log_prob - rollout_data.old_log_prob)
-                first_order_weights[0] = 2
-                first_order_weights[1] = 1
-                #TODO scalarised_advantage = th.matmul(advantages[:, :self.active_obj + 1], first_order_weights[:self.active_obj + 1])
+                scalarised_advantage = th.matmul(advantages[:, :self.active_obj + 1], first_order_weights[:self.active_obj + 1])
                 scalarised_advantage = th.matmul(advantages, first_order_weights)
                 if self.normalize_advantage and len(advantages) > 1:
-                    # normalize advantages per objective
                     scalarised_advantage = (scalarised_advantage - scalarised_advantage.mean(axis=0)) / (scalarised_advantage.std(axis=0) + 1e-8)
 
                 # Compute losses separately
 
-                unclipped_mo_actor_loss = ratio.unsqueeze(dim=1) * advantages
-                clamped_mo_actor_loss = th.clamp(ratio, 1 - clip_range, 1 + clip_range).unsqueeze(1) * advantages
-                mo_actor_loss = th.min(unclipped_mo_actor_loss, clamped_mo_actor_loss)
-                mo_actor_loss = th.mean(mo_actor_loss, axis=0)
-                no_entropy_loss = np.array(mo_actor_loss.detach().cpu())
+                unclipped_mo_actor_loss = th.column_stack((ratio, ratio)) * advantages
+                clamped_ratio = th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                clamped_mo_actor_loss = th.column_stack((clamped_ratio, clamped_ratio)) * advantages
+                mo_actor_loss = th.zeros(self.n_objectives, device=ratio.device)
+                for j in range(self.n_objectives):
+                    mo_actor_loss[j] = -th.min(unclipped_mo_actor_loss[:,j], clamped_mo_actor_loss[:,j]).mean()
+                #mo_actor_loss = -th.min(unclipped_mo_actor_loss, clamped_mo_actor_loss,).mean(axis=0)
+                no_entropy_mo_actor_loss = np.array(mo_actor_loss.detach().cpu())
                 # Add entropy regularisation
                 mo_actor_loss += self.ent_coef * entropy_loss
-                bckpr_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], first_order_weights[:self.active_obj + 1])
 
-                # Compute losses from scalarised advantage
-                unclipped_actor_loss = ratio.unsqueeze(dim=1) * scalarised_advantage
-                clamped_actor_loss =  th.clamp(ratio, 1 - clip_range, 1 + clip_range).unsqueeze(1) * scalarised_advantage
-                actor_loss = th.min(unclipped_actor_loss, clamped_actor_loss)
-                actor_loss = actor_loss.mean()
-                actor_loss += self.ent_coef * entropy_loss
-                bckpr_loss = actor_loss
+                actor_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], first_order_weights[:self.active_obj + 1])
 
-
-                # We only consider the losses of the active objective and the objectives that are more important than it
-                #bckpr_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], first_order_weights[:self.active_obj + 1]) # This is the loss we backpropagate
-                #bckpr_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], th.tensor([0., 1.]).to(mo_actor_loss.device))  # This is the loss we backpropagate
+                # Compute losses from scalarised advantage instead of scalarised loss
+                """unclipped_actor_loss = scalarised_advantage * ratio
+                clamped_actor_loss =   scalarised_advantage * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                actor_loss = -th.min(unclipped_actor_loss, clamped_actor_loss).mean()
+                actor_loss += self.ent_coef * entropy_loss"""
 
                 for obj in range(self.n_objectives):
-                    mo_losses[obj].append(no_entropy_loss[obj])
-
-                scalarised_actor_loss = th.matmul(mo_actor_loss, first_order_weights)
+                    mo_losses[obj].append(no_entropy_mo_actor_loss[obj])
 
                 # Logging
-                pg_losses.append(np.dot(no_entropy_loss, first_order_weights.cpu()))
+                pg_losses.append(np.dot(no_entropy_mo_actor_loss, first_order_weights.cpu()))
                 clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
                 clip_fractions.append(clip_fraction)
 
@@ -216,11 +209,9 @@ class seqLPPO(LPPO):
                 entropy_losses.append(entropy_loss.item())
 
                 # GENERAL LOSES
-                actor_loss = scalarised_actor_loss  # just for standard naming
+                actor_loss = th.matmul(mo_actor_loss[:self.active_obj + 1], first_order_weights[:self.active_obj + 1])
 
                 critic_loss = self.vf_coef * value_loss
-
-                seq_loss = bckpr_loss + critic_loss
 
                 global_loss = actor_loss + critic_loss
 
@@ -240,7 +231,7 @@ class seqLPPO(LPPO):
                     self.policy.critic_optimizer.zero_grad()
 
                     # seq training of actor.
-                    bckpr_loss.backward()
+                    actor_loss.backward()
 
                     critic_loss.backward()
 
@@ -253,7 +244,7 @@ class seqLPPO(LPPO):
                 else:
                     # Optimization step
                     self.policy.optimizer.zero_grad()
-                    seq_loss.backward()
+                    global_loss.backward()
                     # Clip grad norm
                     th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                     self.policy.optimizer.step()

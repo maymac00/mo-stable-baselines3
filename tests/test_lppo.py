@@ -1,13 +1,11 @@
 from stable_baselines3 import PPO
 from stable_baselines3.common.buffers import MoRolloutBuffer
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.vec_env import MoVecEnv, MoDummyVecEnv, DummyVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import MoVecEnv, MoDummyVecEnv, DummyVecEnv, VecMonitor, VecNormalize
 from stable_baselines3.lppo import LPPO, seqLPPO
 
 import numpy as np
 import gymnasium as gym
-
-
 
 class UnbreakableBottlesEnv(gym.Env):
     metadata = {'render.modes': ['human']}
@@ -115,6 +113,19 @@ def linear_schedule(initial_value):
 
     return func
 
+def linear_then_flat(initial_value: float, final_value: float = 5e-6, elbow: float = 0.25):
+    def func(progress_remaining: float) -> float:
+        finish = 1.0 - elbow  # where decay ends and flat begins
+        if progress_remaining > finish:
+            # Linear decay phase
+            linear_progress = (progress_remaining - finish) / elbow
+            return final_value + (initial_value - final_value) * linear_progress
+        else:
+            # Flat phase
+            return final_value
+
+    return func
+
 
 from stable_baselines3.common.monitor import MoMonitor
 from stable_baselines3.common.vec_env import MoVecMonitor
@@ -178,6 +189,7 @@ def make_env():
 env = MoDummyVecEnv([make_env() for _ in range(8)],)
 env = MoVecMonitor(env)
 
+
 def linear_schedule_then_flat(initial_value):
     def func(progress_remaining):
         return max(progress_remaining * initial_value, 1)  # Linearly decrease
@@ -187,15 +199,15 @@ def linear_schedule_then_flat(initial_value):
 args = {
     "n_steps": 512,
     "batch_size": 256,
-    "ent_coef": 0.02,
-    "learning_rate": [linear_schedule(8e-3), linear_schedule(8e-2)],
+    "ent_coef": 0.06,
+    "learning_rate": [linear_schedule(8e-4), linear_schedule(8e-3)],
     "rollout_buffer_class": MoRolloutBuffer,
     "rollout_buffer_kwargs": {},
     "beta_values": [3.0, 1.0],
     "eta_values": 1e-3*2,
     "policy_kwargs": {
         "n_objectives": 2,
-        "net_arch": dict(pi=[128, 64], vf=[128, 64])
+        "net_arch": dict(pi=[128, 128], vf=[128, 128])
     },
     "verbose": 1,
     "device": "cuda:0",
@@ -203,18 +215,17 @@ args = {
     "clip_range_vf": 0.2,
     "gamma": 1.0,
     "normalize_advantage": True,
-    "tolerance": 0.005,
-    "recent_loses_len": 64,
+    "tolerance": linear_then_flat(0.5, 0.05, 0.5),
+    "recent_loses_len": 128,
     "n_epochs": 40
 }
 
-
-model = LPPO("MoMlpPolicy", env, 2, **args)
+model = seqLPPO("MoMlpPolicy", env, 2, **args)
 
 
 #model = PPO("MlpPolicy", env, **args)
 
-model.learn(total_timesteps=1000000, log_interval=1, callback=[
+model.learn(total_timesteps=2000000, log_interval=1, callback=[
     EntropyAnnealingCallback(args["ent_coef"], 0.0001, 1000000)
 ])
 model.save("test_model")
