@@ -979,7 +979,7 @@ class MoRolloutBuffer(RolloutBuffer):
         for step in reversed(range(self.buffer_size)):
             if step == self.buffer_size - 1:
 
-                next_non_terminal = 1.0 - np.tile(dones.astype(np.float32), self.n_objectives).reshape(-1,
+                next_non_terminal = 1.0 - np.tile(dones[:, None].astype(np.float32), self.n_objectives).reshape(-1,
                                                                                                        self.n_objectives)
                 next_values = last_values
             else:
