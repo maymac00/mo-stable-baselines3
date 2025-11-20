@@ -55,8 +55,8 @@ class seqLPPO(LPPO):
             self.logger.record(f"train_mo/tolerance", tol)
             length = len(self.recent_losses[self.active_obj])
             # We compare the recent half of the buffer with the older half
-            l_old_mean = th.tensor(self.recent_losses[self.active_obj])[:int(length / 2)].mean().float()
-            l_new_mean = th.tensor(self.recent_losses[self.active_obj])[int(length / 2):].mean().float()
+            l_old_mean = -th.tensor(self.recent_losses[self.active_obj])[:int(length / 2)].mean().float()
+            l_new_mean = -th.tensor(self.recent_losses[self.active_obj])[int(length / 2):].mean().float()
             # if diff is more than tol, we did not converge yet
             if abs(l_old_mean - l_new_mean) / abs(l_new_mean) > tol:
                 return False
@@ -75,6 +75,7 @@ class seqLPPO(LPPO):
             length = int(self.recent_losses[self.active_obj].maxlen / 2)
             if len(self.recent_losses[self.active_obj]) < length:
                 return
+
             for i in range(self.n_objectives - 1):
                 if len(self.recent_losses[i]) > length + 1:
                     self.j[i] = -th.tensor(self.recent_losses[i])[length:].mean()
@@ -144,16 +145,16 @@ class seqLPPO(LPPO):
 
                 # ratio between old and new policy, should be one at the first iteration
                 ratio = th.exp(log_prob - rollout_data.old_log_prob)
-                scalarised_advantage = th.matmul(advantages[:, :self.active_obj + 1], first_order_weights[:self.active_obj + 1])
+                """scalarised_advantage = th.matmul(advantages[:, :self.active_obj + 1], first_order_weights[:self.active_obj + 1])
                 scalarised_advantage = th.matmul(advantages, first_order_weights)
                 if self.normalize_advantage and len(advantages) > 1:
-                    scalarised_advantage = (scalarised_advantage - scalarised_advantage.mean(axis=0)) / (scalarised_advantage.std(axis=0) + 1e-8)
+                    scalarised_advantage = (scalarised_advantage - scalarised_advantage.mean(axis=0)) / (scalarised_advantage.std(axis=0) + 1e-8)"""
 
                 # Compute losses separately
 
-                unclipped_mo_actor_loss = th.column_stack((ratio, ratio)) * advantages
+                unclipped_mo_actor_loss = th.column_stack([ratio for _ in range(self.n_objectives)]) * advantages
                 clamped_ratio = th.clamp(ratio, 1 - clip_range, 1 + clip_range)
-                clamped_mo_actor_loss = th.column_stack((clamped_ratio, clamped_ratio)) * advantages
+                clamped_mo_actor_loss = th.column_stack([clamped_ratio for _ in range(self.n_objectives)]) * advantages
                 mo_actor_loss = th.zeros(self.n_objectives, device=ratio.device)
                 for j in range(self.n_objectives):
                     mo_actor_loss[j] = -th.min(unclipped_mo_actor_loss[:,j], clamped_mo_actor_loss[:,j]).mean()
