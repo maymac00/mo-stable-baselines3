@@ -53,10 +53,10 @@ class seqLPPO(LPPO):
             tol = self.tolerance if isinstance(self.tolerance, float) else self.tolerance(
                 self._current_progress_remaining)
             self.logger.record(f"train_mo/tolerance", tol)
-            length = len(self.recent_losses[self.active_obj])
+            full_length = len(self.recent_losses[self.active_obj])
             # We compare the recent half of the buffer with the older half
-            l_old_mean = -th.tensor(self.recent_losses[self.active_obj])[:int(length / 2)].mean().float()
-            l_new_mean = -th.tensor(self.recent_losses[self.active_obj])[int(length / 2):].mean().float()
+            l_old_mean = -th.tensor(self.recent_losses[self.active_obj])[:int(full_length / 2)].mean().float()
+            l_new_mean = -th.tensor(self.recent_losses[self.active_obj])[int(full_length / 2):].mean().float()
             # if diff is more than tol, we did not converge yet
             if abs(l_old_mean - l_new_mean) / abs(l_new_mean) > tol:
                 return False
