@@ -8,14 +8,14 @@ from typing import Any, Optional, Union
 
 
 class MoDummyVecEnv(DummyVecEnv):
-    def __init__(self, env_fns, n_objectives=2, *args, **kwargs):
+    def __init__(self, env_fns, n_objectives, *args, **kwargs):
         self.n_objectives = n_objectives
         super().__init__(env_fns, *args, **kwargs)
         self.buf_rews = np.zeros((self.num_envs, n_objectives), dtype=np.float32)
 
 
 class MoVecEnv(SubprocVecEnv):
-    def __init__(self, env_fns, n_objectives=2, *args, **kwargs):
+    def __init__(self, env_fns, n_objectives, *args, **kwargs):
         self.n_objectives = n_objectives
         super().__init__(env_fns, *args, **kwargs)
         self.buf_rews = np.zeros((self.num_envs, n_objectives), dtype=np.float32)
