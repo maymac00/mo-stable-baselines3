@@ -245,11 +245,13 @@ class LPPO(PPO):
                 self._current_progress_remaining)
 
 
-            diff = abs(current_loss_on_j-self.j[i])
+            diff = current_loss_on_j-self.j[i]
 
 
-            if diff > tol:
+            if abs(diff) > tol:
+                # Big enough to move the lagrangian
                 if current_loss_on_j > self.j[i]:
+                    # Direction of the update of the lagrangian
                     # we are deviating from optimal
                     if self.lagr_momentum:
                         self.momentum_velocity[i] = 0.9 * self.momentum_velocity[i] + eta * diff
