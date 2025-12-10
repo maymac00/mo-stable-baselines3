@@ -133,15 +133,8 @@ class LPPO(PPO):
 
                 # Keep track of the losses independently for each agent and objective
                 for obj in range(self.n_objectives):
-                    _surr1 = ratio * advantages[:, obj]
-                    _surr2 = (
-                            th.clamp(ratio, 1 - clip_range, 1 + clip_range) * advantages[:, obj]
-                    )
-                    _surr = th.min(_surr1, _surr2)
-                    # We shouldn't include the entropy term in the buffer of recent losses if we anneal the entropy coefficient.
-                    #_pg_loss = -((_surr + self.ent_coef * entropy)).mean()
-                    #self.recent_losses[obj].append(_pg_loss.detach().cpu())
-                    _pg_loss = -(_surr).mean()
+                    # This loss does not include entropy. We do not clip
+                    _pg_loss = -(ratio * advantages[:, obj]).mean()
                     self.recent_losses[obj].append(_pg_loss.detach().cpu())
 
                 # Logging
@@ -250,6 +243,8 @@ class LPPO(PPO):
 
             eta = self.eta_values[i] if not callable(self.eta_values[i]) else self.eta_values[i](
                 self._current_progress_remaining)
+
+
             diff = abs(current_loss_on_j-self.j[i])
 
 
