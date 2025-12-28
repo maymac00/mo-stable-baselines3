@@ -53,6 +53,7 @@ class LPPO(PPO):
         self.j = np.zeros(self.n_objectives - 1)
         self.lagr_momentum = lagr_momentum
         self.momentum_velocity = np.array([0.0] * (n_objectives - 1))
+        self.lagr_update_direction = [deque(maxlen=256) for _ in range(self.n_objectives-1)]
 
     def get_scalarisation_weights(self):
         """
@@ -253,6 +254,7 @@ class LPPO(PPO):
                 if current_loss_on_j > self.j[i]:
                     # Direction of the update of the lagrangian
                     # we are deviating from optimal
+                    self.lagr_update_direction[i].append(1)
                     if self.lagr_momentum:
                         self.momentum_velocity[i] = 0.9 * self.momentum_velocity[i] + eta * diff
                         self.mu_values[i] += self.momentum_velocity[i]
@@ -261,6 +263,7 @@ class LPPO(PPO):
 
                 else:
                     # we can relax the constraint
+                    self.lagr_update_direction[i].append(-1)
                     self.mu_values[i] -= eta * diff
                     if self.lagr_momentum:
                         self.momentum_velocity[i] *= 0.9 # and decay the momentum
@@ -301,6 +304,7 @@ class LPPO(PPO):
             self.logger.record(f"train_mo/mu_{obj}", self.mu_values[obj])
             self.logger.record(f"train_mo/diffs_{obj}", diffs[obj].item())
             self.logger.record(f"train_mo/tolerance_hit_{obj}", tolerance_hit[obj])
+            self.logger.record(f"train_mo/lagr_update_dir_{obj}", np.mean(self.lagr_update_direction[obj]) if len(self.lagr_update_direction[obj]) > 0 else 0.0)
             if self.lagr_momentum: self.logger.record(f"train_mo/momentum_velocity_{obj}", self.momentum_velocity[obj])
 
             if callable(self.eta_values[obj]):
