@@ -305,6 +305,7 @@ class LPPO(PPO):
             self.logger.record(f"train_mo/diffs_{obj}", diffs[obj].item())
             self.logger.record(f"train_mo/tolerance_hit_{obj}", tolerance_hit[obj])
             self.logger.record(f"train_mo/lagr_update_dir_{obj}", np.mean(self.lagr_update_direction[obj]) if len(self.lagr_update_direction[obj]) > 0 else 0.0)
+
             if self.lagr_momentum: self.logger.record(f"train_mo/momentum_velocity_{obj}", self.momentum_velocity[obj])
 
             if callable(self.eta_values[obj]):
