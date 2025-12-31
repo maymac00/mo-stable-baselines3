@@ -4,6 +4,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import MoVecEnv, MoDummyVecEnv, DummyVecEnv, VecMonitor, VecNormalize, \
     MoVecNormalize
 from stable_baselines3.lppo import LPPO, seqLPPO
+from stable_baselines3.lppo.mod_lppo import modLPPO
 
 import numpy as np
 import gymnasium as gym
@@ -187,9 +188,9 @@ def make_env():
     def _init():
         return UnbreakableBottlesEnv(mode="vector")
     return _init
-env = MoDummyVecEnv([make_env() for _ in range(8)],)
+env = MoDummyVecEnv([make_env() for _ in range(8)], n_objectives=2)
 env = MoVecMonitor(env)
-env = MoVecNormalize(env, norm_obs=False, norm_reward=True, gamma=1)
+env = MoVecNormalize(env, norm_obs=False, norm_reward=False, gamma=1)
 
 
 def linear_schedule_then_flat(initial_value):
@@ -205,7 +206,7 @@ args = {
     "learning_rate": [linear_schedule(0.0001), linear_schedule(0.005)],
     "rollout_buffer_class": MoRolloutBuffer,
     "rollout_buffer_kwargs": {},
-    "beta_values": [3.0, 1.0],
+    "beta_values": [0.0, 1.0],
     "eta_values": 1e-3*2,
     "policy_kwargs": {
         "n_objectives": 2,
@@ -218,17 +219,17 @@ args = {
     "gamma": 1.0,
     "normalize_advantage": True,
     #"tolerance": linear_then_flat(0.5, 0.05, 0.5),
-    "tolerance": linear_schedule(0.105),
-    "recent_loses_len": 192,
+    "tolerance": linear_schedule(0.1),
+    "recent_loses_len": 32,
     "n_epochs": 20
 }
 
-model = seqLPPO("MoMlpPolicy", env, 2, **args)
+model = modLPPO("MoMlpPolicy", env, 2, **args)
 
 
 #model = PPO("MlpPolicy", env, **args)
 
-model.learn(total_timesteps=1000000, log_interval=1, callback=[
+model.learn(total_timesteps=2000000, log_interval=1, callback=[
     EntropyAnnealingCallback(args["ent_coef"], 0.0001, 1000000)
 ])
 model.save("test_model")
