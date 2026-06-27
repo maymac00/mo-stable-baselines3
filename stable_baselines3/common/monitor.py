@@ -185,8 +185,8 @@ class MoMonitor(Monitor):
             ep_rew = []
             ep_len = len(self.rewards[0])
             ep_info = {"l": ep_len, "t": round(time.time() - self.t_start, 6)}
-            for m in self.rewards:
-                rews = sum(m)
+            for m, obj_rewards in enumerate(self.rewards):
+                rews = sum(obj_rewards)
                 ep_rew.append(rews)
                 ep_info[f"r{m}"] = round(rews, 6)
 
