@@ -33,7 +33,8 @@ class LPPO(PPO):
     }
 
     def __init__(self, policy, env, n_objectives, eta_values: List[Union[float, Schedule]] = None, beta_values: List[float] = None,
-                 tolerance: Union[float, Schedule] = 3e-5, recent_loses_len: int = 50, *args, **kwargs):
+                 tolerance: Union[float, Schedule] = 3e-5, recent_loses_len: int = 50,
+                 normalize_advantage_per_objective: bool = False, *args, **kwargs):
         super().__init__(policy, env, *args, **kwargs)
         # We need to replace the default rollout buffer for the multi-objective one
         """self.rollout_buffer = MultiObjectiveRolloutBuffer(
@@ -47,6 +48,12 @@ class LPPO(PPO):
         self.n_objectives = n_objectives
         self.recent_losses = [deque(maxlen=recent_loses_len) for _ in range(self.n_objectives)]
         self.tolerance = tolerance
+        # Rescale each objective's advantages by their running std before the
+        # weighted scalarization (makes beta/mu scale-free but couples the
+        # effective weights to drifting statistics). Independent from
+        # `normalize_advantage`, which normalizes the *scalarized* advantage
+        # per minibatch like standard PPO.
+        self.normalize_advantage_per_objective = normalize_advantage_per_objective
         self.j = np.zeros(self.n_objectives - 1)
         self.running_mean_std_adv = RunningMeanStd(shape=(self.n_objectives,))
 
@@ -112,7 +119,7 @@ class LPPO(PPO):
 
                 advantages = rollout_data.advantages
 
-                if self.normalize_advantage and len(advantages) > 1:
+                if self.normalize_advantage_per_objective and len(advantages) > 1:
                     # normalize advantages per objective (cast stats to the advantage
                     # dtype/device so float32 advantages aren't promoted to float64)
                     adv_mean = th.as_tensor(self.running_mean_std_adv.mean, dtype=advantages.dtype, device=advantages.device)
@@ -126,13 +133,12 @@ class LPPO(PPO):
                 first_order_weighted_advantages = th.matmul(advantages, first_order_weights)
 
                 if self.normalize_advantage and len(advantages) > 1:
-                    # Second normalization, on the scalarized advantage — deliberate.
-                    # The per-objective running normalization above puts objectives on
-                    # comparable scales so the lexicographic weights are meaningful;
-                    # this per-minibatch pass then controls the overall gradient
-                    # magnitude, exactly like standard PPO's advantage normalization.
-                    # It erases the absolute scale of first_order_weights: only the
-                    # *relative* weighting between objectives reaches the gradient.
+                    # Normalize the scalarized advantage per minibatch to control the
+                    # overall gradient magnitude, exactly like standard PPO's advantage
+                    # normalization. It erases the absolute scale of first_order_weights:
+                    # only the *relative* weighting between objectives reaches the
+                    # gradient. Independent from normalize_advantage_per_objective,
+                    # which rescales each objective *before* the weighted sum.
                     first_order_weighted_advantages = (first_order_weighted_advantages - first_order_weighted_advantages.mean()) / (first_order_weighted_advantages.std() + 1e-8)
 
                 policy_loss_1 = first_order_weighted_advantages * ratio
@@ -237,10 +243,10 @@ class LPPO(PPO):
         diffs = []
 
         tol = self.tolerance if isinstance(self.tolerance, float) else self.tolerance(self._current_progress_remaining)
-        # Require some per-update history before comparing the older half of the
-        # window against the newer half; until then leave the multipliers unchanged
-        # (with < 4 entries the halves are empty/singletons and mean() is NaN/noise)
-        if len(self.recent_losses[0]) >= 4:
+        # Warm-up: leave the multipliers unchanged until the buffer is half full,
+        # so the older-half vs newer-half comparison has real history behind it
+        # (and the halves are never empty/singletons, whose mean() is NaN/noise)
+        if len(self.recent_losses[0]) >= self.recent_losses[0].maxlen // 2:
             l = len(self.recent_losses[0]) // 2
             for i in range(self.n_objectives - 1):
                 self.j[i] = th.tensor(self.recent_losses[i])[:l].mean()
@@ -285,11 +291,13 @@ class LPPO(PPO):
 
         if self.normalize_advantage:
             # Effective weight of each objective on the raw advantage scale: the
-            # per-objective normalization divides advantages by their std, and the
             # minibatch normalization of the scalarized advantage removes the
-            # overall scale, so only the relative weights w_i / std_i reach the
-            # gradient. Log them normalized to sum to 1 (each objective's share).
-            raw_scale_weights = first_order_weights.cpu().numpy() / (np.sqrt(self.running_mean_std_adv.var) + 1e-8)
+            # overall scale, so only relative weights reach the gradient; the
+            # per-objective normalization (if enabled) folds an extra 1/std_i
+            # into each weight. Log them normalized to sum to 1 (each objective's share).
+            raw_scale_weights = first_order_weights.cpu().numpy()
+            if self.normalize_advantage_per_objective:
+                raw_scale_weights = raw_scale_weights / (np.sqrt(self.running_mean_std_adv.var) + 1e-8)
             effective_weights = raw_scale_weights / raw_scale_weights.sum()
 
         for obj in range(self.n_objectives):
