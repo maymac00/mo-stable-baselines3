@@ -17,6 +17,7 @@ from stable_baselines3.common.utils import get_system_info, check_for_correct_sp
 from stable_baselines3.common.type_aliases import GymEnv, Schedule
 
 from stable_baselines3.common.base_class import SelfBaseAlgorithm
+from stable_baselines3.common.running_mean_std import RunningMeanStd
 from torch.nn import functional as F
 
 from gymnasium import spaces
@@ -47,6 +48,7 @@ class LPPO(PPO):
         self.recent_losses = [deque(maxlen=recent_loses_len) for _ in range(self.n_objectives)]
         self.tolerance = tolerance
         self.j = np.zeros(self.n_objectives - 1)
+        self.running_mean_std_adv = RunningMeanStd(shape=(self.n_objectives,))
 
     def train(self):
         """
@@ -71,6 +73,7 @@ class LPPO(PPO):
         entropy_losses = []
         pg_losses, value_losses = [], []
         clip_fractions = []
+
         tolerance_hit = [0] * (self.n_objectives-1)
 
         continue_training = True
@@ -83,7 +86,15 @@ class LPPO(PPO):
             first_order_weights[obj] = w
         first_order_weights[-1] = th.tensor(self.beta_values[self.n_objectives - 1],
                                             dtype=first_order_weights.dtype)
-        last_values = None
+        # Update the running advantage statistics once per rollout (not per
+        # minibatch/epoch, which would count the same data n_epochs times and
+        # shift the normalization mid-update)
+        self.running_mean_std_adv.update(self.rollout_buffer.advantages.reshape(-1, self.n_objectives))
+
+        # Per-objective surrogate losses of the first epoch's minibatches;
+        # their mean is appended to recent_losses once per update
+        epoch_zero_losses = [[] for _ in range(self.n_objectives)]
+
         # train for n_epochs epochs
         for epoch in range(self.n_epochs):
             approx_kl_divs = []
@@ -98,11 +109,15 @@ class LPPO(PPO):
                 values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
                 values = values.reshape(-1, self.n_objectives)
                 # Normalize advantage
+
                 advantages = rollout_data.advantages
-                # Normalization does not make sense if mini batchsize == 1, see GH issue #325
+
                 if self.normalize_advantage and len(advantages) > 1:
-                    # normalize advantages per objective
-                    advantages = (advantages - advantages.mean(axis=0)) / (advantages.std(axis=0) + 1e-8)
+                    # normalize advantages per objective (cast stats to the advantage
+                    # dtype/device so float32 advantages aren't promoted to float64)
+                    adv_mean = th.as_tensor(self.running_mean_std_adv.mean, dtype=advantages.dtype, device=advantages.device)
+                    adv_std = th.sqrt(th.as_tensor(self.running_mean_std_adv.var, dtype=advantages.dtype, device=advantages.device))
+                    advantages = (advantages - adv_mean) / (adv_std + 1e-8)
 
                 # ratio between old and new policy, should be one at the first iteration
                 ratio = th.exp(log_prob - rollout_data.old_log_prob)
@@ -111,55 +126,52 @@ class LPPO(PPO):
                 first_order_weighted_advantages = th.matmul(advantages, first_order_weights)
 
                 if self.normalize_advantage and len(advantages) > 1:
+                    # Second normalization, on the scalarized advantage — deliberate.
+                    # The per-objective running normalization above puts objectives on
+                    # comparable scales so the lexicographic weights are meaningful;
+                    # this per-minibatch pass then controls the overall gradient
+                    # magnitude, exactly like standard PPO's advantage normalization.
+                    # It erases the absolute scale of first_order_weights: only the
+                    # *relative* weighting between objectives reaches the gradient.
                     first_order_weighted_advantages = (first_order_weighted_advantages - first_order_weighted_advantages.mean()) / (first_order_weighted_advantages.std() + 1e-8)
 
                 policy_loss_1 = first_order_weighted_advantages * ratio
                 policy_loss_2 = first_order_weighted_advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
                 policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
 
-                # Keep track of the losses independently for each agent and objective
-                for obj in range(self.n_objectives):
-                    _surr1 = ratio * advantages[:, obj]
-                    _surr2 = (
-                            th.clamp(ratio, 1 - clip_range, 1 + clip_range) * advantages[:, obj]
-                    )
-                    _surr = th.min(_surr1, _surr2)
-                    # We shouldn't include the entropy term in the buffer of recent losses if we anneal the entropy coefficient.
-                    #_pg_loss = -((_surr + self.ent_coef * entropy)).mean()
-                    #self.recent_losses[obj].append(_pg_loss.detach().cpu())
-                    _pg_loss = -(_surr).mean()
-                    self.recent_losses[obj].append(_pg_loss.detach().cpu())
+                # Track per-objective surrogate losses for the Lagrange multiplier
+                # update. First epoch only (closest to on-policy), on the
+                # *unnormalized* advantages so values stay comparable across
+                # updates as the running normalization statistics drift.
+                # Entropy is excluded on purpose: an annealed ent_coef would
+                # bias the loss series over time.
+                if epoch == 0:
+                    raw_advantages = rollout_data.advantages
+                    for obj in range(self.n_objectives):
+                        _surr1 = ratio * raw_advantages[:, obj]
+                        _surr2 = (
+                                th.clamp(ratio, 1 - clip_range, 1 + clip_range) * raw_advantages[:, obj]
+                        )
+                        _pg_loss = -th.min(_surr1, _surr2).mean()
+                        epoch_zero_losses[obj].append(_pg_loss.detach().cpu())
 
                 # Logging
                 pg_losses.append(policy_loss.item())
                 clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
                 clip_fractions.append(clip_fraction)
 
-                unclipped_loss = F.mse_loss(rollout_data.returns, values)
-
                 if self.clip_range_vf is None:
                     # No clipping
-                    #values_pred = values
-                    value_loss = unclipped_loss
+                    values_pred = values
                 else:
                     # Clip the difference between old and new value
                     # NOTE: this depends on the reward scaling
-                    if epoch > 0:
-                        clipped_loss = F.mse_loss(
-                            rollout_data.returns,
-                            th.clamp(
-                                values,
-                                last_values - clip_range_vf,
-                                last_values + clip_range_vf,
-                            ))
-                        value_loss = th.min(unclipped_loss, clipped_loss)
-                    else:
-                        # First iteration, no last_values
-                        value_loss = unclipped_loss
+                    values_pred = rollout_data.old_values + th.clamp(
+                        values - rollout_data.old_values, -clip_range_vf, clip_range_vf
+                    )
                 # Value loss using the TD(gae_lambda) target
-                #value_loss = F.mse_loss(rollout_data.returns, values_pred)
+                value_loss = F.mse_loss(rollout_data.returns, values_pred)
                 value_losses.append(value_loss.item())
-                last_values = values.detach()
                 # Entropy loss favor exploration
                 if entropy is None:
                     # Approximate entropy when no analytical form
@@ -191,24 +203,19 @@ class LPPO(PPO):
                     break
 
                 if self.different_optimizers:
-                    # actor
-                    # params_before = copy.deepcopy([p.data.clone() for p in self.policy.parameters()])
                     self.policy.actor_optimizer.zero_grad()
                     self.policy.critic_optimizer.zero_grad()
 
-                    actor_loss.backward()
-
-                    # Critic
-
-                    critic_loss.backward()
+                    # Single backward pass: actor_loss and critic_loss share the
+                    # features-extractor graph, so two separate backward() calls
+                    # would fail (or need retain_graph) with a parameterized extractor
+                    (actor_loss + critic_loss).backward()
 
                     th.nn.utils.clip_grad_norm_(self.policy.actor_params, self.max_grad_norm)
                     th.nn.utils.clip_grad_norm_(self.policy.critic_params, self.max_grad_norm)
 
                     self.policy.actor_optimizer.step()
                     self.policy.critic_optimizer.step()
-                    # params_after = [p.data.clone() for p in self.policy.parameters()]
-                    pass
                 else:
                     # Optimization step
                     self.policy.optimizer.zero_grad()
@@ -221,34 +228,42 @@ class LPPO(PPO):
             if not continue_training:
                 break
 
+        # One entry per policy update: mean first-epoch surrogate loss per objective,
+        # so recent_losses (maxlen=recent_loses_len) spans the last N *updates*
+        for obj in range(self.n_objectives):
+            self.recent_losses[obj].append(th.stack(epoch_zero_losses[obj]).mean())
+
         # Update Lagrange multipliers
         diffs = []
-        diffs_without_tol = []
 
         tol = self.tolerance if isinstance(self.tolerance, float) else self.tolerance(self._current_progress_remaining)
-        l = int(len(self.recent_losses[0])/2)
-        for i in range(self.n_objectives - 1):
-            self.j[i] = (-th.tensor(self.recent_losses[i])[:l]).mean()
-            self.logger.record(f"train_mo/mean_recent_loss_{i}", self.j[i].item())
-            current_loss_on_j = -th.tensor(self.recent_losses[i])[l:].mean()
-            self.logger.record(f"train_mo/current_loss_on_{i}", current_loss_on_j.item())
-            # We dont want our current loss to be larger than the average loss (as that would mean that we are decreasing performance)
+        # Require some per-update history before comparing the older half of the
+        # window against the newer half; until then leave the multipliers unchanged
+        # (with < 4 entries the halves are empty/singletons and mean() is NaN/noise)
+        if len(self.recent_losses[0]) >= 4:
+            l = len(self.recent_losses[0]) // 2
+            for i in range(self.n_objectives - 1):
+                self.j[i] = th.tensor(self.recent_losses[i])[:l].mean()
+                self.logger.record(f"train_mo/mean_recent_loss_{i}", self.j[i].item())
+                current_loss_on_j = th.tensor(self.recent_losses[i])[l:].mean()
+                self.logger.record(f"train_mo/current_loss_on_{i}", current_loss_on_j.item())
+                # We dont want our current loss to be larger than the average loss (as that would mean that we are decreasing performance)
 
-            eta = self.eta_values[i] if not callable(self.eta_values[i]) else self.eta_values[i](
-                self._current_progress_remaining)
-            diff = abs(current_loss_on_j-self.j[i])
-            if diff > tol:
-                if current_loss_on_j > self.j[i]:
-                    # we are deviating from optimal
-                    self.mu_values[i] += eta * diff
+                eta = self.eta_values[i] if not callable(self.eta_values[i]) else self.eta_values[i](
+                    self._current_progress_remaining)
+                diff = abs(current_loss_on_j-self.j[i])
+                if diff > tol:
+                    if current_loss_on_j > self.j[i]:
+                        # we are deviating from optimal
+                        self.mu_values[i] += eta * diff
+                    else:
+                        # we can relax the constraint
+                        self.mu_values[i] -= eta * diff
                 else:
-                    # we can relax the constraint
-                    self.mu_values[i] -= eta * diff
-            else:
-                tolerance_hit[i] = 1
+                    tolerance_hit[i] = 1
 
-            self.mu_values[i] = max(0, self.mu_values[i])
-            diffs.append(diff)
+                self.mu_values[i] = max(0, self.mu_values[i])
+                diffs.append(diff)
 
 
         explained_vars = [explained_variance(self.rollout_buffer.values[:,j].flatten(), self.rollout_buffer.returns[:,j].flatten()) for j in range(self.n_objectives)]
@@ -268,16 +283,33 @@ class LPPO(PPO):
 
         # Lexico Logs
 
+        if self.normalize_advantage:
+            # Effective weight of each objective on the raw advantage scale: the
+            # per-objective normalization divides advantages by their std, and the
+            # minibatch normalization of the scalarized advantage removes the
+            # overall scale, so only the relative weights w_i / std_i reach the
+            # gradient. Log them normalized to sum to 1 (each objective's share).
+            raw_scale_weights = first_order_weights.cpu().numpy() / (np.sqrt(self.running_mean_std_adv.var) + 1e-8)
+            effective_weights = raw_scale_weights / raw_scale_weights.sum()
+
         for obj in range(self.n_objectives):
             self.logger.record(f"train_mo/advantage_scalarisation_weight_{obj}",
                                first_order_weights[obj].float().item())
             self.logger.record(f"train_mo/loss_{obj}", np.mean(self.recent_losses[obj]))
             self.logger.record(f"train_mo/explained_variance_{obj}", explained_vars[obj])
-            
+
+            if self.normalize_advantage:
+                self.logger.record(f"train_mo/effective_weights_{obj}", effective_weights[obj])
+
         for obj in range(self.n_objectives - 1):
             self.logger.record(f"train_mo/mu_{obj}", self.mu_values[obj])
-            self.logger.record(f"train_mo/diffs_{obj}", diffs[obj].item())
-            self.logger.record(f"train_mo/tolerance_hit_{obj}", tolerance_hit[obj])
+            if diffs:
+                self.logger.record(f"train_mo/diffs_{obj}", diffs[obj].item())
+                self.logger.record(f"train_mo/tolerance_hit_{obj}", tolerance_hit[obj])
+            
+            self.logger.record(f"train_mo/advantage_mean_{obj}", self.running_mean_std_adv.mean[obj])
+            self.logger.record(f"train_mo/advantage_std_{obj}", np.sqrt(self.running_mean_std_adv.var[obj]))
+
 
             if callable(self.eta_values[obj]):
                 self.logger.record(f"train_mo/eta_{obj}", self.eta_values[obj](self._current_progress_remaining))
