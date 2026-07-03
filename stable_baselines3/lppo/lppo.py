@@ -306,7 +306,7 @@ class LPPO(PPO):
             self.logger.record(f"train_mo/loss_{obj}", np.mean(self.recent_losses[obj]))
             self.logger.record(f"train_mo/explained_variance_{obj}", explained_vars[obj])
 
-            if self.normalize_advantage:
+            if self.normalize_advantage_per_objective:
                 self.logger.record(f"train_mo/effective_weights_{obj}", effective_weights[obj])
 
         for obj in range(self.n_objectives - 1):
