@@ -844,7 +844,10 @@ class MoRolloutBuffer(RolloutBuffer):
     def __init__(self, buffer_size, observation_space, action_space, device, n_objectives: int = 2, gamma=0.99,
                  gae_lambda=0.95, *args, **kwargs):
         self.n_objectives = n_objectives
-        super().__init__(buffer_size, observation_space, action_space, device, gamma, gae_lambda, *args, **kwargs)
+        # Forward by keyword: RolloutBuffer's positional order is (gae_lambda, gamma),
+        # the reverse of this signature — passing positionally swapped the two.
+        super().__init__(buffer_size, observation_space, action_space, device,
+                         gae_lambda=gae_lambda, gamma=gamma, *args, **kwargs)
         # Overwrite objectives buffer
         # self.rewards = np.zeros((self.buffer_size, self.n_envs), dtype=np.float32)
         self.rewards = np.zeros((buffer_size, self.n_envs, self.n_objectives), dtype=np.float32)
@@ -978,13 +981,18 @@ class MoRolloutBuffer(RolloutBuffer):
         last_gae_lam = 0
         for step in reversed(range(self.buffer_size)):
             if step == self.buffer_size - 1:
-
-                next_non_terminal = 1.0 - np.tile(dones[:, None].astype(np.float32), self.n_objectives).reshape(-1,
-                                                                                                       self.n_objectives)
+                # Repeat each env's flag across objectives: shape (n_envs, n_objectives).
+                # NOTE: do not use np.tile on the flat (n_envs,) array + reshape, as that
+                # assigns env (n_objectives*i + j) % n_envs's flag to env i, objective j,
+                # scrambling episode boundaries across envs whenever n_envs > 1.
+                next_non_terminal = 1.0 - np.repeat(
+                    dones.astype(np.float32)[:, None], self.n_objectives, axis=1
+                )
                 next_values = last_values
             else:
-                next_non_terminal = 1.0 - np.tile(self.episode_starts[step + 1], self.n_objectives).reshape(-1,
-                                                                                                            self.n_objectives)
+                next_non_terminal = 1.0 - np.repeat(
+                    self.episode_starts[step + 1][:, None], self.n_objectives, axis=1
+                )
                 next_values = self.values[step + 1]
             delta = self.rewards[step] + self.gamma * next_values * next_non_terminal - self.values[step]
             last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
